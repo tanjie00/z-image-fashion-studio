@@ -54,11 +54,14 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
         if (res.ok) {
           const data = await res.json();
           setZImageOnline(data.status === 'online');
+          setZImageMode(data.mode || 'unknown');
         } else {
           setZImageOnline(false);
+          setZImageMode('unknown');
         }
       } catch {
         setZImageOnline(false);
+        setZImageMode('unknown');
       }
     };
     checkHealth();
@@ -77,6 +80,7 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
   }, [project, canGenerate, onStartGeneration]);
 
   const isZImage = zImageParams.model === 'z-image';
+  const [zImageMode, setZImageMode] = useState<string>('unknown');
 
   // Group resolutions
   const resolutionGroups = Z_IMAGE_RESOLUTIONS.reduce<Record<string, typeof Z_IMAGE_RESOLUTIONS[number][]>>((acc, res) => {
@@ -184,7 +188,7 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Z-Image Model */}
+            {/* Z-Image Model (Primary) */}
             <button
               onClick={() => setZImageParams({ model: 'z-image' })}
               className={`relative text-left p-4 rounded-xl border-2 transition-all ${
@@ -201,10 +205,10 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
                   <div className="flex items-center gap-2">
                     <span className="font-semibold text-sm">Z-Image 造相</span>
                     <Badge className="text-[10px] bg-violet-100 text-violet-700 border-violet-200">
-                      推荐
+                      默认
                     </Badge>
                   </div>
-                  <p className="text-xs text-gray-500">通义万相 · 高质量文生图模型</p>
+                  <p className="text-xs text-gray-500">通义MAI · 6B参数 · 高质量文生图模型</p>
                 </div>
                 {isZImage && (
                   <CheckCircle2 className="size-5 text-violet-500" />
@@ -218,50 +222,70 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
                     <><span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> 离线</>
                   )}
                 </span>
+                {zImageOnline && zImageMode !== 'unknown' && (
+                  <>
+                    <span>·</span>
+                    <span className="text-violet-500">
+                      {zImageMode === 'remote' && 'HF Space'}
+                      {zImageMode === 'api' && 'HF API'}
+                      {zImageMode === 'local' && '本地GPU'}
+                      {zImageMode === 'fallback' && '自动回退'}
+                    </span>
+                  </>
+                )}
                 <span>·</span>
                 <span>支持负提示词</span>
                 <span>·</span>
                 <span>多分辨率</span>
+                <span>·</span>
+                <span>CFG引导</span>
               </div>
               {!zImageOnline && isZImage && (
                 <p className="mt-2 text-xs text-amber-600 bg-amber-50 rounded p-2">
-                  Z-Image 服务当前离线，生成时将自动回退到默认模型
+                  Z-Image 服务当前离线，生成时将自动回退到备选模型。请确保 z-image-service 已启动。
                 </p>
               )}
             </button>
 
-            {/* Default Model */}
+            {/* Default Model (Fallback) */}
             <button
               onClick={() => setZImageParams({ model: 'default' })}
               className={`relative text-left p-4 rounded-xl border-2 transition-all ${
                 !isZImage
-                  ? 'border-rose-500 bg-rose-50 shadow-md'
-                  : 'border-gray-200 bg-white hover:border-rose-200 hover:bg-rose-50/50'
+                  ? 'border-gray-400 bg-gray-50 shadow-md'
+                  : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50/50'
               }`}
             >
               <div className="flex items-center gap-3 mb-2">
-                <div className={`rounded-lg p-2 ${!isZImage ? 'bg-rose-500' : 'bg-gray-100'}`}>
+                <div className={`rounded-lg p-2 ${!isZImage ? 'bg-gray-500' : 'bg-gray-100'}`}>
                   <ImageIcon className={`size-4 ${!isZImage ? 'text-white' : 'text-gray-500'}`} />
                 </div>
                 <div className="flex-1">
-                  <span className="font-semibold text-sm">默认 AI 模型</span>
-                  <p className="text-xs text-gray-500">内置 AI 图像生成</p>
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-sm">备选 AI 模型</span>
+                    <Badge className="text-[10px] bg-gray-100 text-gray-500 border-gray-200">
+                      回退
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-gray-500">内置 AI 图像生成（始终可用）</p>
                 </div>
                 {!isZImage && (
-                  <CheckCircle2 className="size-5 text-rose-500" />
+                  <CheckCircle2 className="size-5 text-gray-500" />
                 )}
               </div>
               <div className="flex items-center gap-2 text-xs text-gray-400">
                 <span>快速生成</span>
                 <span>·</span>
                 <span>始终在线</span>
+                <span>·</span>
+                <span>无需额外服务</span>
               </div>
             </button>
           </div>
         </CardContent>
       </Card>
 
-      {/* Z-Image Specific Parameters */}
+      {/* Z-Image Model Parameters */}
       {isZImage && (
         <Card>
           <CardHeader className="pb-3">
@@ -269,7 +293,10 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
               <div className="rounded-full bg-violet-100 p-1.5">
                 <Zap className="size-4 text-violet-600" />
               </div>
-              Z-Image 参数配置
+              Z-Image 模型参数
+              <Badge className="text-[10px] bg-violet-100 text-violet-700 border-violet-200 ml-1">
+                Tongyi-MAI/Z-Image
+              </Badge>
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">

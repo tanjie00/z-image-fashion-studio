@@ -14,24 +14,50 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Forward the request to the Z-Image Python bridge service
-    const response = await fetch(`${Z_IMAGE_SERVICE_URL}/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt,
-        negative_prompt: negative_prompt || '',
-        resolution: resolution || '864x1152 ( 3:4 )',
-        seed: seed ?? 42,
-        num_inference_steps: num_inference_steps ?? 30,
-        guidance_scale: guidance_scale ?? 4.0,
-        cfg_normalization: cfg_normalization ?? false,
-        random_seed: random_seed ?? true,
-        reference_image: reference_image || null,
-      }),
-      // Long timeout for image generation
-      signal: AbortSignal.timeout(300000), // 5 minutes
-    });
+    // Try fallback endpoint first (supports multiple backends), then regular generate
+    let response: Response | null = null;
+
+    try {
+      response = await fetch(`${Z_IMAGE_SERVICE_URL}/generate/fallback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          negative_prompt: negative_prompt || '',
+          resolution: resolution || '864x1152 ( 3:4 )',
+          seed: seed ?? 42,
+          num_inference_steps: num_inference_steps ?? 30,
+          guidance_scale: guidance_scale ?? 4.0,
+          cfg_normalization: cfg_normalization ?? false,
+          random_seed: random_seed ?? true,
+          reference_image: reference_image || null,
+        }),
+        signal: AbortSignal.timeout(300000), // 5 minutes
+      });
+    } catch {
+      // Fallback endpoint might not exist in older versions
+      response = null;
+    }
+
+    // If fallback failed, try regular generate endpoint
+    if (!response || !response.ok) {
+      response = await fetch(`${Z_IMAGE_SERVICE_URL}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          negative_prompt: negative_prompt || '',
+          resolution: resolution || '864x1152 ( 3:4 )',
+          seed: seed ?? 42,
+          num_inference_steps: num_inference_steps ?? 30,
+          guidance_scale: guidance_scale ?? 4.0,
+          cfg_normalization: cfg_normalization ?? false,
+          random_seed: random_seed ?? true,
+          reference_image: reference_image || null,
+        }),
+        signal: AbortSignal.timeout(300000),
+      });
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -72,7 +98,7 @@ export async function GET() {
 
     if (!response.ok) {
       return NextResponse.json(
-        { status: 'offline', model: 'Tongyi-MAI/Z-Image' },
+        { status: 'offline', model: 'Tongyi-MAI/Z-Image', mode: 'unknown' },
         { status: 200 }
       );
     }
@@ -81,7 +107,7 @@ export async function GET() {
     return NextResponse.json({ ...health, status: 'online' });
   } catch {
     return NextResponse.json(
-      { status: 'offline', model: 'Tongyi-MAI/Z-Image' },
+      { status: 'offline', model: 'Tongyi-MAI/Z-Image', mode: 'unknown' },
       { status: 200 }
     );
   }

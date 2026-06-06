@@ -46,6 +46,21 @@ function imageToBase64(relativePath: string): string | null {
   return null;
 }
 
+/**
+ * Check if Z-Image service is available
+ */
+async function isZImageAvailable(): Promise<boolean> {
+  const Z_IMAGE_SERVICE_URL = process.env.Z_IMAGE_SERVICE_URL || 'http://localhost:8001';
+  try {
+    const response = await fetch(`${Z_IMAGE_SERVICE_URL}/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -102,7 +117,15 @@ export async function POST(
 
       // Parse generation params
       const taskParams = JSON.parse(task.params || '{}');
-      const useZImage = taskParams.model === 'z-image';
+
+      // Determine which model to use: z-image (default) or fallback
+      const requestedModel = taskParams.model || 'z-image';
+      const zImageAvailable = await isZImageAvailable();
+      const useZImage = requestedModel === 'z-image' && zImageAvailable;
+
+      if (requestedModel === 'z-image' && !zImageAvailable) {
+        console.warn('[Z-Image] Service unavailable, falling back to default AI SDK');
+      }
 
       // Build prompt
       const garmentDesc = getCategoryDescription(garmentImage?.category || null);
@@ -139,12 +162,31 @@ export async function POST(
           reference_image: referenceImage,
         };
 
-        const zImageResponse = await fetch(`${Z_IMAGE_SERVICE_URL}/generate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(zImagePayload),
-          signal: AbortSignal.timeout(300000), // 5 minutes timeout
-        });
+        // Try with fallback endpoint first, then regular generate
+        let zImageResponse: Response | null = null;
+
+        // Try the fallback endpoint (tries multiple backends)
+        try {
+          zImageResponse = await fetch(`${Z_IMAGE_SERVICE_URL}/generate/fallback`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(zImagePayload),
+            signal: AbortSignal.timeout(300000), // 5 minutes timeout
+          });
+        } catch {
+          // Fallback endpoint might not exist in older versions, try regular
+          zImageResponse = null;
+        }
+
+        // If fallback failed, try regular generate endpoint
+        if (!zImageResponse || !zImageResponse.ok) {
+          zImageResponse = await fetch(`${Z_IMAGE_SERVICE_URL}/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(zImagePayload),
+            signal: AbortSignal.timeout(300000), // 5 minutes timeout
+          });
+        }
 
         if (!zImageResponse.ok) {
           const errorText = await zImageResponse.text();
@@ -158,10 +200,10 @@ export async function POST(
         }
 
         imageBuffer = Buffer.from(zImageResult.image_base64, 'base64');
-        console.log('[Z-Image] Image generated successfully');
+        console.log(`[Z-Image] Image generated successfully (mode: ${zImageResult.mode || 'unknown'})`);
 
       } else {
-        // --- Default AI SDK Generation ---
+        // --- Default AI SDK Generation (fallback) ---
         console.log('[Default] Using default AI SDK for generation...');
 
         const ZAI = (await import('z-ai-web-dev-sdk')).default;

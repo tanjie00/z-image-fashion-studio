@@ -39,7 +39,7 @@ const defaultZImageParams: ZImageParams = {
   cfgNormalization: false,
   randomSeed: true,
   seed: 42,
-  negativePrompt: '',
+  negativePrompt: 'low quality, blurry, distorted, deformed, disfigured, bad anatomy, bad hands, missing fingers, extra digits, watermark, text',
 };
 
 export const useAppStore = create<AppState>((set) => ({

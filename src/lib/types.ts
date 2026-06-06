@@ -126,16 +126,30 @@ export const POSE_CATEGORIES = [
 
 /** Z-Image resolution options */
 export const Z_IMAGE_RESOLUTIONS = [
+  // 竖屏 - 模特展示首选
+  { value: "864x1152 ( 3:4 )", label: "864x1152 (3:4 竖屏)", group: "竖屏推荐" },
+  { value: "576x800 ( 3:4 )", label: "576x800 (3:4 竖屏)", group: "竖屏推荐" },
+  { value: "1104x1472 ( 3:4 )", label: "1104x1472 (3:4 竖屏)", group: "竖屏推荐" },
+  { value: "512x896 ( 9:16 )", label: "512x896 (9:16 竖屏)", group: "竖屏" },
+  { value: "720x1280 ( 9:16 )", label: "720x1280 (9:16 竖屏)", group: "竖屏" },
+  { value: "864x1536 ( 9:16 )", label: "864x1536 (9:16 竖屏)", group: "竖屏" },
+  { value: "544x832 ( 2:3 )", label: "544x832 (2:3 竖屏)", group: "竖屏" },
+  { value: "832x1248 ( 2:3 )", label: "832x1248 (2:3 竖屏)", group: "竖屏" },
+  { value: "1024x1536 ( 2:3 )", label: "1024x1536 (2:3 竖屏)", group: "竖屏" },
+  { value: "896x1152 ( 7:9 )", label: "896x1152 (7:9 竖屏)", group: "竖屏" },
+  { value: "1120x1440 ( 7:9 )", label: "1120x1440 (7:9 竖屏)", group: "竖屏" },
+  { value: "576x1344 ( 9:21 )", label: "576x1344 (9:21 长竖屏)", group: "竖屏" },
+  // 标准
   { value: "720x720 ( 1:1 )", label: "720x720 (1:1)", group: "标准" },
+  { value: "1024x1024 ( 1:1 )", label: "1024x1024 (1:1)", group: "标准" },
+  { value: "1280x1280 ( 1:1 )", label: "1280x1280 (1:1)", group: "标准" },
+  // 横屏
   { value: "896x512 ( 16:9 )", label: "896x512 (16:9 横屏)", group: "横屏" },
   { value: "1280x720 ( 16:9 )", label: "1280x720 (16:9 横屏)", group: "横屏" },
   { value: "1536x864 ( 16:9 )", label: "1536x864 (16:9 横屏)", group: "横屏" },
-  { value: "512x896 ( 9:16 )", label: "512x896 (9:16 竖屏)", group: "竖屏" },
-  { value: "720x1280 ( 9:16 )", label: "720x1280 (9:16 竖屏)", group: "竖屏" },
-  { value: "864x1152 ( 3:4 )", label: "864x1152 (3:4 竖屏)", group: "竖屏" },
-  { value: "864x1536 ( 9:16 )", label: "864x1536 (9:16 竖屏)", group: "竖屏" },
-  { value: "1024x1024 ( 1:1 )", label: "1024x1024 (1:1)", group: "标准" },
   { value: "1152x864 ( 4:3 )", label: "1152x864 (4:3)", group: "横屏" },
-  { value: "1024x1536 ( 2:3 )", label: "1024x1536 (2:3 竖屏)", group: "竖屏" },
-  { value: "1280x1280 ( 1:1 )", label: "1280x1280 (1:1)", group: "标准" },
+  { value: "832x544 ( 3:2 )", label: "832x544 (3:2)", group: "横屏" },
+  { value: "1248x832 ( 3:2 )", label: "1248x832 (3:2)", group: "横屏" },
+  { value: "1536x1024 ( 3:2 )", label: "1536x1024 (3:2)", group: "横屏" },
+  { value: "1344x576 ( 21:9 )", label: "1344x576 (21:9 宽屏)", group: "横屏" },
 ] as const;
