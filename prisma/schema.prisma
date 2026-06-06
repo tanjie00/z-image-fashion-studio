@@ -1,0 +1,82 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  status      String   @default("draft") // draft, active, completed
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  modelImages     ModelImage[]
+  garmentImages   GarmentImage[]
+  generationTasks GenerationTask[]
+}
+
+model ModelImage {
+  id        String   @id @default(cuid())
+  projectId String
+  url       String
+  name      String
+  width     Int?
+  height    Int?
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model GarmentImage {
+  id        String   @id @default(cuid())
+  projectId String
+  url       String
+  name      String
+  width     Int?
+  height    Int?
+  category  String?  // top, bottom, dress, outerwear, accessory
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model PoseTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  category    String   @default("standing") // standing, sitting, walking, dynamic, fashion
+  thumbnail   String?
+  poseData    String?  // JSON string of OpenPose keypoints
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+model GenerationTask {
+  id             String   @id @default(cuid())
+  projectId      String
+  modelImageId   String
+  garmentImageId String
+  poseTemplateId String?
+  status         String   @default("pending") // pending, processing, completed, failed
+  prompt         String?  // generation prompt
+  params         String   @default("{}") // JSON: garmentStrength, poseFollow, faceConsistency, etc.
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  results        GenerationResult[]
+}
+
+model GenerationResult {
+  id        String   @id @default(cuid())
+  taskId    String
+  url       String
+  width     Int?
+  height    Int?
+  createdAt DateTime @default(now())
+  task      GenerationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+}
