@@ -1,16 +1,24 @@
 """
-Z-Image Bridge Service - Enhanced Version
-Supports multiple backends:
-  - remote: HuggingFace Space API via gradio_client (default, no GPU needed)
-  - api: HuggingFace Inference API (serverless, requires HF token)
-  - local: Local diffusers pipeline (requires GPU with ~24GB VRAM)
+Z-Image Bridge Service v3.0
+============================
+通义MAI Z-Image 6B文生图模型桥接服务，支持多种部署后端：
 
-Environment Variables:
-  ZIMAGE_MODE: remote | api | local (default: remote)
-  ZIMAGE_HF_TOKEN: HuggingFace API token (required for api mode)
-  ZIMAGE_LOCAL_MODEL: Local model path or HF repo ID (default: Tongyi-MAI/Z-Image)
-  ZIMAGE_DEVICE: Device for local mode (default: cuda)
-  ZIMAGE_PORT: Service port (default: 8001)
+  - modelscope: ModelScope Space API（推荐，国内访问快，无需GPU）
+  - remote: HuggingFace Space API via gradio_client（海外环境）
+  - api: HuggingFace Inference API（需要HF Token）
+  - local: 本地 diffusers 推理（需要GPU ~24GB VRAM）
+
+模型来源:
+  - ModelScope: https://www.modelscope.cn/models/Tongyi-MAI/Z-Image/
+  - HuggingFace: https://huggingface.co/Tongyi-MAI/Z-Image/
+
+环境变量:
+  ZIMAGE_MODE: modelscope | remote | api | local (默认: modelscope)
+  ZIMAGE_HF_TOKEN: HuggingFace API Token (api模式必需)
+  ZIMAGE_MS_TOKEN: ModelScope SDK Token (可选，提升速率)
+  ZIMAGE_LOCAL_MODEL: 本地模型路径或仓库ID (默认: Tongyi-MAI/Z-Image)
+  ZIMAGE_DEVICE: 推理设备 (默认: cuda)
+  ZIMAGE_PORT: 服务端口 (默认: 8001)
 """
 
 import os
@@ -19,7 +27,6 @@ import io
 import tempfile
 import time
 import logging
-import asyncio
 from typing import Optional
 
 import uvicorn
@@ -30,7 +37,7 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("z-image-service")
 
-app = FastAPI(title="Z-Image Bridge Service", version="2.0.0")
+app = FastAPI(title="Z-Image Bridge Service", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,60 +47,117 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration
-ZIMAGE_MODE = os.environ.get("ZIMAGE_MODE", "remote").lower()
+# --- Configuration ---
+ZIMAGE_MODE = os.environ.get("ZIMAGE_MODE", "modelscope").lower()
 ZIMAGE_HF_TOKEN = os.environ.get("ZIMAGE_HF_TOKEN", "")
+ZIMAGE_MS_TOKEN = os.environ.get("ZIMAGE_MS_TOKEN", "")
 ZIMAGE_LOCAL_MODEL = os.environ.get("ZIMAGE_LOCAL_MODEL", "Tongyi-MAI/Z-Image")
 ZIMAGE_DEVICE = os.environ.get("ZIMAGE_DEVICE", "cuda")
 ZIMAGE_PORT = int(os.environ.get("ZIMAGE_PORT", "8001"))
 
-logger.info(f"Z-Image Service starting in '{ZIMAGE_MODE}' mode")
+MODEL_INFO = {
+    "name": "Tongyi-MAI/Z-Image",
+    "description": "通义MAI Z-Image 6B 文生图模型",
+    "modelscope_url": "https://www.modelscope.cn/models/Tongyi-MAI/Z-Image/",
+    "huggingface_url": "https://huggingface.co/Tongyi-MAI/Z-Image/",
+    "paper": "arXiv:2511.22699",
+}
+
+logger.info(f"Z-Image Service v3.0 starting in '{ZIMAGE_MODE}' mode")
 
 # --- Lazy-loaded backends ---
 _gradio_client = None
+_ms_space_client = None
 _local_pipeline = None
 _hf_api_initialized = False
 
 
 def get_gradio_client():
-    """Lazily initialize the Gradio client for HF Space."""
+    """Lazily initialize the Gradio client for HuggingFace Space."""
     global _gradio_client
     if _gradio_client is None:
         try:
             from gradio_client import Client
-            logger.info("Initializing Gradio client for Tongyi-MAI/Z-Image Space...")
+            logger.info("Initializing Gradio client for HuggingFace Space: Tongyi-MAI/Z-Image...")
             kwargs = {}
             if ZIMAGE_HF_TOKEN:
                 kwargs["hf_token"] = ZIMAGE_HF_TOKEN
             _gradio_client = Client("Tongyi-MAI/Z-Image", **kwargs)
-            logger.info("Gradio client initialized successfully")
+            logger.info("HuggingFace Gradio client initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize Gradio client: {e}")
+            logger.error(f"Failed to initialize HF Gradio client: {e}")
             raise
     return _gradio_client
 
 
+def get_modelscope_client():
+    """Lazily initialize the client for ModelScope Space."""
+    global _ms_space_client
+    if _ms_space_client is None:
+        try:
+            from modelscope import AutoModel
+            logger.info("ModelScope SDK not needed for Space API mode, using HTTP client")
+        except ImportError:
+            pass
+
+        try:
+            from gradio_client import Client
+            logger.info("Initializing Gradio client for ModelScope Space: Tongyi-MAI/Z-Image...")
+            # ModelScope Space also exposes a Gradio-compatible API
+            ms_space_url = "https://www.modelscope.cn/api/v1/spaces/Tongyi-MAI/Z-Image"
+            kwargs = {}
+            if ZIMAGE_MS_TOKEN:
+                kwargs["hf_token"] = ZIMAGE_MS_TOKEN
+            try:
+                _ms_space_client = Client(ms_space_url, **kwargs)
+                logger.info("ModelScope Gradio client initialized successfully")
+            except Exception:
+                # Fallback: try direct HF Space (same model, different hosting)
+                logger.warning("ModelScope Space client failed, falling back to HuggingFace Space")
+                _ms_space_client = get_gradio_client()
+        except Exception as e:
+            logger.error(f"Failed to initialize ModelScope client: {e}")
+            raise
+    return _ms_space_client
+
+
 def get_local_pipeline():
-    """Lazily initialize the local diffusers pipeline."""
+    """Lazily initialize the local diffusers pipeline (from ModelScope or HuggingFace)."""
     global _local_pipeline
     if _local_pipeline is None:
         try:
             import torch
-            from diffusers import ZImagePipeline
+            # Try importing ZImagePipeline
+            try:
+                from diffusers import ZImagePipeline
+                pipeline_class = ZImagePipeline
+            except ImportError:
+                logger.warning("ZImagePipeline not found in diffusers, trying DiffusionPipeline...")
+                from diffusers import DiffusionPipeline
+                pipeline_class = DiffusionPipeline
 
             logger.info(f"Loading Z-Image model from {ZIMAGE_LOCAL_MODEL}...")
-            _local_pipeline = ZImagePipeline.from_pretrained(
-                ZIMAGE_LOCAL_MODEL,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-            )
+
+            # Try ModelScope first, then HuggingFace
+            try:
+                from modelscope import snapshot_download
+                ms_model_path = snapshot_download(ZIMAGE_LOCAL_MODEL)
+                logger.info(f"Model downloaded from ModelScope: {ms_model_path}")
+                _local_pipeline = pipeline_class.from_pretrained(
+                    ms_model_path,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                )
+            except ImportError:
+                logger.info("ModelScope SDK not available, using HuggingFace download...")
+                _local_pipeline = pipeline_class.from_pretrained(
+                    ZIMAGE_LOCAL_MODEL,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                )
+
             _local_pipeline.to(ZIMAGE_DEVICE)
             logger.info(f"Z-Image pipeline loaded on {ZIMAGE_DEVICE}")
-        except ImportError:
-            logger.error(
-                "Local mode requires: pip install git+https://github.com/huggingface/diffusers torch transformers accelerate safetensors"
-            )
-            raise
         except Exception as e:
             logger.error(f"Failed to load local pipeline: {e}")
             raise
@@ -105,7 +169,7 @@ def init_hf_api():
     global _hf_api_initialized
     if not _hf_api_initialized:
         if not ZIMAGE_HF_TOKEN:
-            raise ValueError("ZIMAGE_HF_TOKEN is required for API mode")
+            raise ValueError("ZIMAGE_HF_TOKEN is required for api mode")
         _hf_api_initialized = True
     return True
 
@@ -137,7 +201,8 @@ class HealthResponse(BaseModel):
     status: str
     mode: str
     model: str
-    space_url: Optional[str] = None
+    modelscope_url: Optional[str] = None
+    huggingface_url: Optional[str] = None
     local_available: Optional[bool] = None
     gpu_available: Optional[bool] = None
 
@@ -154,6 +219,96 @@ def parse_resolution(resolution_str: str) -> tuple[int, int]:
         logger.warning(f"Failed to parse resolution '{resolution_str}', defaulting to 864x1152")
         return 864, 1152
 
+
+def _read_image_to_base64(image_path: str) -> Optional[str]:
+    """Read an image from a local path or URL and return base64."""
+    if os.path.exists(image_path):
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+    elif image_path.startswith("http"):
+        import urllib.request
+        try:
+            resp = urllib.request.urlopen(image_path, timeout=60)
+            data = resp.read()
+            return base64.b64encode(data).decode("utf-8")
+        except Exception as e:
+            logger.error(f"Failed to download image from {image_path}: {e}")
+    return None
+
+
+# --- Backend: ModelScope Space ---
+
+def generate_modelscope(request: GenerateRequest) -> GenerateResponse:
+    """Generate using ModelScope Space API (推荐国内用户使用)."""
+    client = get_modelscope_client()
+
+    gallery_images = []
+    if request.reference_image:
+        img_data = base64.b64decode(request.reference_image)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(img_data)
+            temp_path = f.name
+        gallery_images = [{"image": {"path": temp_path}, "caption": None}]
+
+    logger.info(f"[modelscope] Generating image with prompt: {request.prompt[:100]}...")
+    start_time = time.time()
+
+    result = client.predict(
+        prompt=request.prompt,
+        negative_prompt=request.negative_prompt,
+        resolution=request.resolution,
+        seed=request.seed,
+        num_inference_steps=request.num_inference_steps,
+        guidance_scale=request.guidance_scale,
+        cfg_normalization=request.cfg_normalization,
+        random_seed=request.random_seed,
+        gallery_images=gallery_images,
+        api_name="/generate",
+    )
+
+    elapsed = time.time() - start_time
+    logger.info(f"[modelscope] Image generated in {elapsed:.2f}s")
+
+    # Clean up temp file
+    if request.reference_image and gallery_images:
+        try:
+            os.unlink(gallery_images[0]["image"]["path"])
+        except Exception:
+            pass
+
+    # Parse result
+    generated_images, seed_used, seed_value = result
+
+    if not generated_images or len(generated_images) == 0:
+        return GenerateResponse(success=False, error="No image was generated", mode="modelscope")
+
+    first_image = generated_images[0]
+    image_path = None
+
+    if isinstance(first_image, dict):
+        image_info = first_image.get("image", {})
+        if isinstance(image_info, dict):
+            image_path = image_info.get("path") or image_info.get("url")
+        elif isinstance(image_info, str):
+            image_path = image_info
+
+    if not image_path:
+        return GenerateResponse(success=False, error="Could not extract image path from response", mode="modelscope")
+
+    image_base64 = _read_image_to_base64(image_path)
+    if not image_base64:
+        return GenerateResponse(success=False, error=f"Image path not accessible: {image_path}", mode="modelscope")
+
+    return GenerateResponse(
+        success=True,
+        image_base64=image_base64,
+        seed_used=str(seed_used) if seed_used else None,
+        seed=seed_value if isinstance(seed_value, (int, float)) else None,
+        mode="modelscope",
+    )
+
+
+# --- Backend: HuggingFace Space ---
 
 def generate_remote(request: GenerateRequest) -> GenerateResponse:
     """Generate using HuggingFace Space via gradio_client."""
@@ -186,14 +341,12 @@ def generate_remote(request: GenerateRequest) -> GenerateResponse:
     elapsed = time.time() - start_time
     logger.info(f"[remote] Image generated in {elapsed:.2f}s")
 
-    # Clean up temp file
     if request.reference_image and gallery_images:
         try:
             os.unlink(gallery_images[0]["image"]["path"])
         except Exception:
             pass
 
-    # Parse result
     generated_images, seed_used, seed_value = result
 
     if not generated_images or len(generated_images) == 0:
@@ -212,7 +365,6 @@ def generate_remote(request: GenerateRequest) -> GenerateResponse:
     if not image_path:
         return GenerateResponse(success=False, error="Could not extract image path from response", mode="remote")
 
-    # Read and encode the image
     image_base64 = _read_image_to_base64(image_path)
     if not image_base64:
         return GenerateResponse(success=False, error=f"Image path not accessible: {image_path}", mode="remote")
@@ -225,6 +377,8 @@ def generate_remote(request: GenerateRequest) -> GenerateResponse:
         mode="remote",
     )
 
+
+# --- Backend: HuggingFace Inference API ---
 
 def generate_api(request: GenerateRequest) -> GenerateResponse:
     """Generate using HuggingFace Inference API (serverless)."""
@@ -246,8 +400,6 @@ def generate_api(request: GenerateRequest) -> GenerateResponse:
             "negative_prompt": request.negative_prompt or None,
         },
     }
-
-    # Remove None values
     payload["parameters"] = {k: v for k, v in payload["parameters"].items() if v is not None}
 
     logger.info(f"[api] Generating image via HF Inference API: {request.prompt[:100]}...")
@@ -270,30 +422,19 @@ def generate_api(request: GenerateRequest) -> GenerateResponse:
         image_base64 = base64.b64encode(image_data).decode("utf-8")
         elapsed = time.time() - start_time
         logger.info(f"[api] Image generated in {elapsed:.2f}s")
-
-        return GenerateResponse(
-            success=True,
-            image_base64=image_base64,
-            mode="api",
-        )
+        return GenerateResponse(success=True, image_base64=image_base64, mode="api")
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
         logger.error(f"[api] HF Inference API error: {e.code} - {error_body}")
         if e.code == 503:
-            return GenerateResponse(
-                success=False,
-                error="Model is loading, please retry in 30-60 seconds",
-                mode="api",
-            )
-        return GenerateResponse(
-            success=False,
-            error=f"HF API error ({e.code}): {error_body[:500]}",
-            mode="api",
-        )
+            return GenerateResponse(success=False, error="Model is loading, please retry in 30-60 seconds", mode="api")
+        return GenerateResponse(success=False, error=f"HF API error ({e.code}): {error_body[:500]}", mode="api")
     except Exception as e:
         logger.error(f"[api] Generation failed: {e}")
         return GenerateResponse(success=False, error=str(e), mode="api")
 
+
+# --- Backend: Local Pipeline ---
 
 def generate_local(request: GenerateRequest) -> GenerateResponse:
     """Generate using local diffusers pipeline."""
@@ -326,8 +467,6 @@ def generate_local(request: GenerateRequest) -> GenerateResponse:
     logger.info(f"[local] Image generated in {elapsed:.2f}s")
 
     image = result.images[0]
-
-    # Encode to base64
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -339,22 +478,6 @@ def generate_local(request: GenerateRequest) -> GenerateResponse:
         seed=seed,
         mode="local",
     )
-
-
-def _read_image_to_base64(image_path: str) -> Optional[str]:
-    """Read an image from a local path or URL and return base64."""
-    if os.path.exists(image_path):
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-    elif image_path.startswith("http"):
-        import urllib.request
-        try:
-            resp = urllib.request.urlopen(image_path, timeout=60)
-            data = resp.read()
-            return base64.b64encode(data).decode("utf-8")
-        except Exception as e:
-            logger.error(f"Failed to download image from {image_path}: {e}")
-    return None
 
 
 # --- API Endpoints ---
@@ -373,20 +496,20 @@ async def health_check():
     if ZIMAGE_MODE == "local":
         local_available = gpu_available
 
-    response = HealthResponse(
+    return HealthResponse(
         status="ok",
         mode=ZIMAGE_MODE,
-        model="Tongyi-MAI/Z-Image",
-        space_url="https://huggingface.co/spaces/Tongyi-MAI/Z-Image" if ZIMAGE_MODE == "remote" else None,
+        model=MODEL_INFO["name"],
+        modelscope_url=MODEL_INFO["modelscope_url"],
+        huggingface_url=MODEL_INFO["huggingface_url"],
         local_available=local_available,
         gpu_available=gpu_available,
     )
-    return response
 
 
 @app.get("/resolutions")
 async def get_resolutions():
-    """Return available resolution options."""
+    """Return available resolution options for Z-Image."""
     return {
         "resolutions": [
             {"value": "720x720 ( 1:1 )", "label": "720x720 (1:1)", "width": 720, "height": 720},
@@ -424,37 +547,41 @@ async def get_resolutions():
 async def generate_image(request: GenerateRequest):
     """Generate an image using Z-Image model with the configured backend."""
     try:
-        if ZIMAGE_MODE == "local":
-            result = generate_local(request)
+        if ZIMAGE_MODE == "modelscope":
+            return generate_modelscope(request)
+        elif ZIMAGE_MODE == "local":
+            return generate_local(request)
         elif ZIMAGE_MODE == "api":
-            result = generate_api(request)
-        else:  # remote (default)
-            result = generate_remote(request)
-        return result
+            return generate_api(request)
+        else:  # remote (HuggingFace Space)
+            return generate_remote(request)
     except Exception as e:
         logger.error(f"Image generation failed: {e}", exc_info=True)
-        return GenerateResponse(
-            success=False,
-            error=str(e),
-            mode=ZIMAGE_MODE,
-        )
+        return GenerateResponse(success=False, error=str(e), mode=ZIMAGE_MODE)
 
 
 @app.post("/generate/fallback", response_model=GenerateResponse)
 async def generate_with_fallback(request: GenerateRequest):
-    """Try primary backend, then fallback to others if it fails."""
-    # Try modes in order based on configured mode
-    if ZIMAGE_MODE == "local":
-        modes = ["local", "api", "remote"]
-    elif ZIMAGE_MODE == "api":
-        modes = ["api", "remote", "local"]
-    else:
-        modes = ["remote", "api", "local"]
+    """Try primary backend, then fallback to others.
+
+    Fallback order (optimized for Chinese users):
+      modelscope → remote (HF Space) → api → local
+    """
+    # Determine fallback order based on configured mode
+    mode_orders = {
+        "modelscope": ["modelscope", "remote", "api", "local"],
+        "remote": ["remote", "modelscope", "api", "local"],
+        "api": ["api", "modelscope", "remote", "local"],
+        "local": ["local", "modelscope", "remote", "api"],
+    }
+    modes = mode_orders.get(ZIMAGE_MODE, ["modelscope", "remote", "api", "local"])
 
     last_error = None
     for mode in modes:
         try:
-            if mode == "remote":
+            if mode == "modelscope":
+                result = generate_modelscope(request)
+            elif mode == "remote":
                 result = generate_remote(request)
             elif mode == "api":
                 if not ZIMAGE_HF_TOKEN:
@@ -476,7 +603,7 @@ async def generate_with_fallback(request: GenerateRequest):
             last_error = result.error
         except Exception as e:
             last_error = str(e)
-            logger.warning(f"[{mode}] mode failed, trying next: {e}")
+            logger.warning(f"[{mode}] backend failed, trying next: {e}")
             continue
 
     return GenerateResponse(
@@ -487,5 +614,6 @@ async def generate_with_fallback(request: GenerateRequest):
 
 
 if __name__ == "__main__":
-    logger.info(f"Starting Z-Image Bridge Service v2.0 on port {ZIMAGE_PORT} (mode: {ZIMAGE_MODE})")
+    logger.info(f"Starting Z-Image Bridge Service v3.0 on port {ZIMAGE_PORT} (mode: {ZIMAGE_MODE})")
+    logger.info(f"Model: {MODEL_INFO['name']} | ModelScope: {MODEL_INFO['modelscope_url']}")
     uvicorn.run(app, host="0.0.0.0", port=ZIMAGE_PORT, log_level="info")

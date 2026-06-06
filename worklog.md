@@ -1,5 +1,69 @@
 # Work Log
 
+## Task 6 - Z-Image Model Integration (ModelScope + HuggingFace)
+**Date:** 2026-06-06
+**Status:** Completed
+
+### Summary
+Integrated the Tongyi-MAI/Z-Image 6B text-to-image model into the application, replacing the default `z-ai-web-dev-sdk` as the primary generation backend. Added ModelScope support for better China mainland access.
+
+### Key Changes
+
+1. **Z-Image Python Bridge Service v3.0** (`z-image-service/main.py`):
+   - Added `modelscope` mode (default) — ModelScope Space API for China mainland users
+   - Kept `remote` mode — HuggingFace Space via gradio_client
+   - Kept `api` mode — HuggingFace Inference API (serverless)
+   - Kept `local` mode — Local diffusers pipeline (GPU required)
+   - Added `/generate/fallback` endpoint with smart fallback chain: modelscope → remote → api → local
+   - Health endpoint returns both ModelScope and HuggingFace URLs
+
+2. **Missing Upload API Routes** (previously broken, now fixed):
+   - `src/app/api/upload/model/route.ts` — POST: Upload model images
+   - `src/app/api/upload/garment/route.ts` — POST: Upload garment images
+   - `src/app/api/upload/model/[id]/route.ts` — DELETE: Remove model image
+   - `src/app/api/upload/garment/[id]/route.ts` — DELETE: Remove garment image
+
+3. **Generation API Enhancement** (`src/app/api/generate/[id]/process/route.ts`):
+   - Z-Image is now the default generation model
+   - Added automatic fallback to `z-ai-web-dev-sdk` when Z-Image service is offline
+   - Tries `/generate/fallback` endpoint first for multi-backend resilience
+
+4. **Z-Image Proxy API** (`src/app/api/z-image/generate/route.ts`):
+   - Updated to try fallback endpoint first, then regular generate
+   - Returns mode information in health response
+
+5. **Frontend Updates**:
+   - Z-Image shown as primary model with "默认" badge
+   - Default AI SDK relabeled as "备选 AI 模型"
+   - Added ModelScope mode indicator in health display
+   - Default negative prompt set to common quality exclusions
+   - Model badge shows "ModelScope/HF"
+
+6. **Configuration**:
+   - `.env` updated with Z-Image environment variables
+   - `package.json` scripts: `z-image` (modelscope), `z-image:hf`, `z-image:local`
+   - `z-image-service/start.sh` updated with mode-specific dependency installation
+
+### Environment Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| ZIMAGE_MODE | modelscope | Backend mode |
+| ZIMAGE_PORT | 8001 | Bridge service port |
+| ZIMAGE_SERVICE_URL | http://localhost:8001 | Used by Next.js |
+| ZIMAGE_HF_TOKEN | | HuggingFace API token |
+| ZIMAGE_MS_TOKEN | | ModelScope token (optional) |
+| ZIMAGE_LOCAL_MODEL | Tongyi-MAI/Z-Image | Model repo/path for local mode |
+| ZIMAGE_DEVICE | cuda | Device for local mode |
+
+### Model Info
+- **Name**: Tongyi-MAI/Z-Image
+- **Parameters**: 6B
+- **Architecture**: S3-DiT (Scalable Single-Stream Diffusion Transformer)
+- **ModelScope**: https://www.modelscope.cn/models/Tongyi-MAI/Z-Image/
+- **HuggingFace**: https://huggingface.co/Tongyi-MAI/Z-Image/
+- **Paper**: arXiv:2511.22699
+- **License**: Apache 2.0
+
 ## Task 4 - Backend Developer: API Routes Implementation
 **Date:** 2025-01-23
 **Status:** Completed

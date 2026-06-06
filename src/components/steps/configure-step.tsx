@@ -208,7 +208,7 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
                       默认
                     </Badge>
                   </div>
-                  <p className="text-xs text-gray-500">通义MAI · 6B参数 · 高质量文生图模型</p>
+                  <p className="text-xs text-gray-500">通义MAI · 6B参数 · ModelScope/HuggingFace</p>
                 </div>
                 {isZImage && (
                   <CheckCircle2 className="size-5 text-violet-500" />
@@ -226,6 +226,7 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
                   <>
                     <span>·</span>
                     <span className="text-violet-500">
+                      {zImageMode === 'modelscope' && 'ModelScope'}
                       {zImageMode === 'remote' && 'HF Space'}
                       {zImageMode === 'api' && 'HF API'}
                       {zImageMode === 'local' && '本地GPU'}
@@ -295,7 +296,7 @@ export function ConfigureStep({ project, onStartGeneration }: ConfigureStepProps
               </div>
               Z-Image 模型参数
               <Badge className="text-[10px] bg-violet-100 text-violet-700 border-violet-200 ml-1">
-                Tongyi-MAI/Z-Image
+                ModelScope/HF
               </Badge>
             </CardTitle>
           </CardHeader>

@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
-    "z-image": "cd z-image-service && python3 main.py",
+    "z-image": "cd z-image-service && ZIMAGE_MODE=modelscope python3 main.py",
+    "z-image:hf": "cd z-image-service && ZIMAGE_MODE=remote python3 main.py",
+    "z-image:local": "cd z-image-service && ZIMAGE_MODE=local python3 main.py",
     "dev:all": "concurrently 'npm run dev' 'npm run z-image'",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
