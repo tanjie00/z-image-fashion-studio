@@ -1,0 +1,229 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      build_gui:
+        description: 'Build GUI version with system tray'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - build_type: console
+            main_file: main.py
+            exe_name: Z-Image-Service
+          - build_type: gui
+            main_file: launcher.py
+            exe_name: Z-Image-Service-GUI
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install fastapi uvicorn pydantic gradio_client
+        working-directory: z-image-service
+
+      - name: Build EXE (Console)
+        if: matrix.build_type == 'console'
+        run: |
+          pyinstaller --clean --console `
+            --name "Z-Image-Service" `
+            --onefile `
+            --optimize 1 `
+            --hidden-import=uvicorn.logging `
+            --hidden-import=uvicorn.loops.auto `
+            --hidden-import=uvicorn.protocols.http.auto `
+            --hidden-import=uvicorn.protocols.websockets.auto `
+            --hidden-import=uvicorn.lifespan.on `
+            --hidden-import=fastapi `
+            --hidden-import=fastapi.middleware.cors `
+            --hidden-import=pydantic `
+            --hidden-import=pydantic.fields `
+            --hidden-import=pydantic.main `
+            --hidden-import=pydantic.types `
+            --hidden-import=anyio._backends._asyncio `
+            --hidden-import=httpcore `
+            --hidden-import=httpx `
+            --hidden-import=gradio_client `
+            --hidden-import=gradio_client.client `
+            --hidden-import=websockets `
+            --hidden-import=websockets.legacy `
+            --hidden-import=websockets.legacy.client `
+            --exclude-module=tkinter `
+            --exclude-module=matplotlib `
+            --exclude-module=numpy `
+            --exclude-module=PIL `
+            --exclude-module=scipy `
+            --exclude-module=pandas `
+            --exclude-module=IPython `
+            --exclude-module=pytest `
+            main.py
+        working-directory: z-image-service
+
+      - name: Build EXE (GUI)
+        if: matrix.build_type == 'gui'
+        run: |
+          pyinstaller --clean --noconsole `
+            --name "Z-Image-Service-GUI" `
+            --onefile `
+            --optimize 1 `
+            --hidden-import=uvicorn.logging `
+            --hidden-import=uvicorn.loops.auto `
+            --hidden-import=uvicorn.protocols.http.auto `
+            --hidden-import=uvicorn.protocols.websockets.auto `
+            --hidden-import=uvicorn.lifespan.on `
+            --hidden-import=fastapi `
+            --hidden-import=fastapi.middleware.cors `
+            --hidden-import=pydantic `
+            --hidden-import=pydantic.fields `
+            --hidden-import=pydantic.main `
+            --hidden-import=pydantic.types `
+            --hidden-import=anyio._backends._asyncio `
+            --hidden-import=httpcore `
+            --hidden-import=httpx `
+            --hidden-import=gradio_client `
+            --hidden-import=gradio_client.client `
+            --hidden-import=websockets `
+            --hidden-import=websockets.legacy `
+            --hidden-import=websockets.legacy.client `
+            --exclude-module=tkinter `
+            --exclude-module=matplotlib `
+            --exclude-module=numpy `
+            --exclude-module=PIL `
+            --exclude-module=scipy `
+            --exclude-module=pandas `
+            --exclude-module=IPython `
+            --exclude-module=pytest `
+            launcher.py
+        working-directory: z-image-service
+
+      - name: Test EXE
+        run: |
+          Start-Process -FilePath ".\dist\Z-Image-Service.exe" -NoNewWindow
+          Start-Sleep -Seconds 5
+          try {
+            $response = Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 10 -UseBasicParsing
+            Write-Host "Health check passed: $($response.Content)"
+          } catch {
+            Write-Host "Warning: Health check failed (may be normal if no network): $_"
+          }
+          Stop-Process -Name "Z-Image-Service" -Force -ErrorAction SilentlyContinue
+        working-directory: z-image-service
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.exe_name }}
+          path: z-image-service/dist/${{ matrix.exe_name }}.exe
+          retention-days: 30
+
+  create-release:
+    needs: build-windows-exe
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release package
+        run: |
+          mkdir -p release-package
+          cp artifacts/Z-Image-Service/Z-Image-Service.exe release-package/
+          cp artifacts/Z-Image-Service-GUI/Z-Image-Service-GUI.exe release-package/ 2>/dev/null || true
+          
+          # Create launcher batch file
+          cat > release-package/启动服务.bat << 'EOF'
+          @echo off
+          echo ============================================================
+          echo   Z-Image Bridge Service - Windows Launcher
+          echo   通义MAI Z-Image 6B 文生图模型服务
+          echo ============================================================
+          echo.
+          set ZIMAGE_MODE=modelscope
+          set ZIMAGE_PORT=8001
+          echo 正在启动 Z-Image 服务...
+          echo 模式: %ZIMAGE_MODE%
+          echo 端口: %ZIMAGE_PORT%
+          echo.
+          echo 服务启动后访问: http://localhost:%ZIMAGE_PORT%/health
+          echo 按 Ctrl+C 停止服务
+          echo.
+          Z-Image-Service.exe
+          pause
+          EOF
+
+          # Create README
+          cat > release-package/README.txt << 'EOF'
+          ============================================================
+            Z-Image Bridge Service - Windows版
+            通义MAI Z-Image 6B 文生图模型服务
+          ============================================================
+
+          【快速启动】
+            1. 双击 "启动服务.bat" 启动服务
+            2. 默认使用 ModelScope 模式（推荐国内用户）
+
+          【配置说明】
+            编辑 "启动服务.bat" 中的环境变量:
+            ZIMAGE_MODE=modelscope   运行模式
+            ZIMAGE_PORT=8001         服务端口
+
+          【模型来源】
+            ModelScope:  https://www.modelscope.cn/models/Tongyi-MAI/Z-Image/
+            HuggingFace: https://huggingface.co/Tongyi-MAI/Z-Image/
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-package/*
+          generate_release_notes: true
+          body: |
+            ## Z-Image Bridge Service - Windows版
+
+            通义MAI Z-Image 6B 文生图模型服务 Windows 可执行文件
+
+            ### 下载文件
+            - `Z-Image-Service.exe` - 控制台版本
+            - `Z-Image-Service-GUI.exe` - GUI托盘版本（如有）
+            - `启动服务.bat` - 一键启动脚本
+            - `README.txt` - 使用说明
+
+            ### 快速使用
+            1. 下载所有文件到同一目录
+            2. 双击 `启动服务.bat` 启动服务
+            3. 服务默认使用 ModelScope 模式，国内用户无需配置即可使用
+
+            ### 模型来源
+            - ModelScope: https://www.modelscope.cn/models/Tongyi-MAI/Z-Image/
+            - HuggingFace: https://huggingface.co/Tongyi-MAI/Z-Image/

@@ -1,0 +1,20 @@
+# Z-Image Bridge Service Dependencies
+# 通义MAI Z-Image 6B 文生图模型桥接服务
+
+# Core web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+
+# Gradio client (for ModelScope & HuggingFace Space modes)
+gradio_client>=1.0.0
+
+# Optional: ModelScope SDK (for local model download from ModelScope)
+# modelscope>=1.9.0
+
+# Optional: Local inference (requires GPU ~24GB VRAM)
+# torch>=2.1.0
+# diffusers>=0.25.0
+# transformers>=4.36.0
+# accelerate>=0.25.0
+# safetensors>=0.4.0
