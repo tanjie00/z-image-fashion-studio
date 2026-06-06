@@ -1,0 +1,5 @@
+# Z-Image Service 核心依赖
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+gradio_client>=1.0.0
