@@ -31,6 +31,7 @@ from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -81,11 +82,12 @@ def get_gradio_client():
             logger.info("Initializing Gradio client for HuggingFace Space: Tongyi-MAI/Z-Image...")
             kwargs = {}
             if ZIMAGE_HF_TOKEN:
-                kwargs["hf_token"] = ZIMAGE_HF_TOKEN
+                kwargs["token"] = ZIMAGE_HF_TOKEN
             _gradio_client = Client("Tongyi-MAI/Z-Image", **kwargs)
             logger.info("HuggingFace Gradio client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize HF Gradio client: {e}")
+            _gradio_client = None  # Reset so next call retries
             raise
     return _gradio_client
 
@@ -107,7 +109,7 @@ def get_modelscope_client():
             ms_space_url = "https://www.modelscope.cn/api/v1/spaces/Tongyi-MAI/Z-Image"
             kwargs = {}
             if ZIMAGE_MS_TOKEN:
-                kwargs["hf_token"] = ZIMAGE_MS_TOKEN
+                kwargs["token"] = ZIMAGE_MS_TOKEN
             try:
                 _ms_space_client = Client(ms_space_url, **kwargs)
                 logger.info("ModelScope Gradio client initialized successfully")
@@ -122,44 +124,62 @@ def get_modelscope_client():
 
 
 def get_local_pipeline():
-    """Lazily initialize the local diffusers pipeline (from ModelScope or HuggingFace)."""
+    """Lazily initialize the local diffusers pipeline (from ModelScope or HuggingFace).
+    
+    Supports Z-Image-Turbo with CPU offload for low VRAM GPUs (6GB).
+    """
     global _local_pipeline
     if _local_pipeline is None:
         try:
             import torch
-            # Try importing ZImagePipeline
+            # Try importing ZImagePipeline (Turbo version)
             try:
                 from diffusers import ZImagePipeline
                 pipeline_class = ZImagePipeline
+                is_turbo = True
             except ImportError:
                 logger.warning("ZImagePipeline not found in diffusers, trying DiffusionPipeline...")
                 from diffusers import DiffusionPipeline
                 pipeline_class = DiffusionPipeline
+                is_turbo = False
 
-            logger.info(f"Loading Z-Image model from {ZIMAGE_LOCAL_MODEL}...")
+            model_id = ZIMAGE_LOCAL_MODEL
+            logger.info(f"Loading Z-Image model from {model_id}...")
 
-            # Try ModelScope first, then HuggingFace
-            try:
-                from modelscope import snapshot_download
-                ms_model_path = snapshot_download(ZIMAGE_LOCAL_MODEL)
-                logger.info(f"Model downloaded from ModelScope: {ms_model_path}")
-                _local_pipeline = pipeline_class.from_pretrained(
-                    ms_model_path,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                )
-            except ImportError:
-                logger.info("ModelScope SDK not available, using HuggingFace download...")
-                _local_pipeline = pipeline_class.from_pretrained(
-                    ZIMAGE_LOCAL_MODEL,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                )
+            # Check if model path exists locally
+            if os.path.isdir(model_id):
+                local_path = model_id
+                logger.info(f"Using local model path: {local_path}")
+            else:
+                # Download from HuggingFace (use HF_ENDPOINT for mirror)
+                local_path = model_id
 
-            _local_pipeline.to(ZIMAGE_DEVICE)
-            logger.info(f"Z-Image pipeline loaded on {ZIMAGE_DEVICE}")
+            # Load with low CPU memory usage
+            _local_pipeline = pipeline_class.from_pretrained(
+                local_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+            )
+
+            # Enable CPU offload for low VRAM GPUs (6GB)
+            gpu_mem = 0
+            if torch.cuda.is_available():
+                gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+                logger.info(f"GPU VRAM: {gpu_mem:.1f} GB")
+
+            if gpu_mem > 0 and gpu_mem < 12:
+                logger.info(f"Enabling sequential CPU offload for {gpu_mem:.1f}GB GPU...")
+                _local_pipeline.enable_sequential_cpu_offload()
+            else:
+                _local_pipeline.to(ZIMAGE_DEVICE)
+
+            # Enable VAE slicing to reduce memory
+            _local_pipeline.enable_vae_slicing()
+
+            logger.info(f"Z-Image pipeline loaded successfully (Turbo: {is_turbo})")
         except Exception as e:
             logger.error(f"Failed to load local pipeline: {e}")
+            _local_pipeline = None  # Reset so next call retries
             raise
     return _local_pipeline
 
@@ -243,38 +263,34 @@ def generate_modelscope(request: GenerateRequest) -> GenerateResponse:
     client = get_modelscope_client()
 
     gallery_images = []
+    temp_path = None
     if request.reference_image:
         img_data = base64.b64decode(request.reference_image)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(img_data)
-            temp_path = f.name
-        gallery_images = [{"image": {"path": temp_path}, "caption": None}]
+        # Use data URI instead of local file path for remote Space compatibility
+        data_uri = f"data:image/png;base64,{request.reference_image}"
+        gallery_images = [{"image": {"url": data_uri}, "caption": None}]
 
     logger.info(f"[modelscope] Generating image with prompt: {request.prompt[:100]}...")
     start_time = time.time()
 
-    result = client.predict(
-        prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
-        resolution=request.resolution,
-        seed=request.seed,
-        num_inference_steps=request.num_inference_steps,
-        guidance_scale=request.guidance_scale,
-        cfg_normalization=request.cfg_normalization,
-        random_seed=request.random_seed,
-        gallery_images=gallery_images,
-        api_name="/generate",
-    )
+    # Build params matching Space API expected types
+    predict_params = {
+        "prompt": request.prompt,
+        "negative_prompt": request.negative_prompt if request.negative_prompt else "",
+        "resolution": request.resolution,
+        "seed": int(request.seed),
+        "num_inference_steps": int(request.num_inference_steps),
+        "guidance_scale": float(request.guidance_scale),
+        "cfg_normalization": bool(request.cfg_normalization),
+        "random_seed": bool(request.random_seed),
+        "gallery_images": gallery_images if gallery_images else [],
+        "api_name": "/generate",
+    }
+
+    result = client.predict(**predict_params)
 
     elapsed = time.time() - start_time
     logger.info(f"[modelscope] Image generated in {elapsed:.2f}s")
-
-    # Clean up temp file
-    if request.reference_image and gallery_images:
-        try:
-            os.unlink(gallery_images[0]["image"]["path"])
-        except Exception:
-            pass
 
     # Parse result
     generated_images, seed_used, seed_value = result
@@ -316,36 +332,31 @@ def generate_remote(request: GenerateRequest) -> GenerateResponse:
 
     gallery_images = []
     if request.reference_image:
-        img_data = base64.b64decode(request.reference_image)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(img_data)
-            temp_path = f.name
-        gallery_images = [{"image": {"path": temp_path}, "caption": None}]
+        # Use data URI instead of local file path for remote Space compatibility
+        data_uri = f"data:image/png;base64,{request.reference_image}"
+        gallery_images = [{"image": {"url": data_uri}, "caption": None}]
 
     logger.info(f"[remote] Generating image with prompt: {request.prompt[:100]}...")
     start_time = time.time()
 
-    result = client.predict(
-        prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
-        resolution=request.resolution,
-        seed=request.seed,
-        num_inference_steps=request.num_inference_steps,
-        guidance_scale=request.guidance_scale,
-        cfg_normalization=request.cfg_normalization,
-        random_seed=request.random_seed,
-        gallery_images=gallery_images,
-        api_name="/generate",
-    )
+    # Build params matching Space API expected types
+    predict_params = {
+        "prompt": request.prompt,
+        "negative_prompt": request.negative_prompt if request.negative_prompt else "",
+        "resolution": request.resolution,
+        "seed": int(request.seed),
+        "num_inference_steps": int(request.num_inference_steps),
+        "guidance_scale": float(request.guidance_scale),
+        "cfg_normalization": bool(request.cfg_normalization),
+        "random_seed": bool(request.random_seed),
+        "gallery_images": gallery_images if gallery_images else [],
+        "api_name": "/generate",
+    }
+
+    result = client.predict(**predict_params)
 
     elapsed = time.time() - start_time
     logger.info(f"[remote] Image generated in {elapsed:.2f}s")
-
-    if request.reference_image and gallery_images:
-        try:
-            os.unlink(gallery_images[0]["image"]["path"])
-        except Exception:
-            pass
 
     generated_images, seed_used, seed_value = result
 
@@ -443,13 +454,37 @@ def generate_local(request: GenerateRequest) -> GenerateResponse:
     pipe = get_local_pipeline()
     width, height = parse_resolution(request.resolution)
 
+    # Limit resolution for low VRAM
+    max_pixels = 1024 * 1024  # 1MP max for 6GB GPU
+    if width * height > max_pixels:
+        scale = (max_pixels / (width * height)) ** 0.5
+        width = int(width * scale // 64) * 64
+        height = int(height * scale // 64) * 64
+        logger.info(f"[local] Resolution reduced to {width}x{height} for low VRAM")
+
     seed = request.seed
     if request.random_seed:
         seed = int(time.time() * 1000) % (2**32)
 
-    generator = torch.Generator(ZIMAGE_DEVICE).manual_seed(seed)
+    # For Turbo model, guidance_scale should be 0.0
+    # Auto-detect: if pipeline is ZImagePipeline, use 0.0
+    try:
+        from diffusers import ZImagePipeline
+        is_turbo = isinstance(pipe, ZImagePipeline)
+    except ImportError:
+        is_turbo = False
 
-    logger.info(f"[local] Generating image: {request.prompt[:100]}...")
+    guidance = 0.0 if is_turbo else request.guidance_scale
+    steps = int(request.num_inference_steps)
+    # Turbo works best with 6-11 steps
+    if is_turbo and steps > 11:
+        steps = 9
+        logger.info("[local] Turbo mode: reducing steps to 9")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    generator = torch.Generator(device).manual_seed(seed)
+
+    logger.info(f"[local] Generating image ({width}x{height}, steps={steps}, cfg={guidance}, turbo={is_turbo}): {request.prompt[:100]}...")
     start_time = time.time()
 
     result = pipe(
@@ -457,9 +492,8 @@ def generate_local(request: GenerateRequest) -> GenerateResponse:
         negative_prompt=request.negative_prompt or None,
         height=height,
         width=width,
-        num_inference_steps=int(request.num_inference_steps),
-        guidance_scale=request.guidance_scale,
-        cfg_normalization=request.cfg_normalization,
+        num_inference_steps=steps,
+        guidance_scale=guidance,
         generator=generator,
     )
 
@@ -481,6 +515,186 @@ def generate_local(request: GenerateRequest) -> GenerateResponse:
 
 
 # --- API Endpoints ---
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Z-Image Service Dashboard</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #71717a; --border: #e4e4e7;
+    --primary: #f43f5e; --primary-light: #fff1f2; --primary-border: #fecdd3;
+    --violet: #8b5cf6; --violet-light: #ede9fe; --violet-border: #c4b5fd;
+    --emerald: #10b981; --amber: #f59e0b; --gray-50: #f9fafb; --gray-100: #f3f4f6;
+    --radius: 10px; --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: var(--gray-50); color: var(--fg); line-height: 1.6; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+  .header { background: var(--bg); border-bottom: 1px solid var(--border); padding: 16px 0; margin-bottom: 24px; position: sticky; top: 0; z-index: 50; box-shadow: var(--shadow); }
+  .header-inner { max-width: 960px; margin: 0 auto; padding: 0 16px; display: flex; align-items: center; justify-content: space-between; }
+  .logo { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 600; }
+  .logo-icon { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg, #fb7185, #ec4899); display: flex; align-items: center; justify-content: center; color: white; font-size: 16px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: 500; }
+  .badge-emerald { background: #ecfdf5; color: #059669; }
+  .badge-rose { background: var(--primary-light); color: var(--primary); }
+  .badge-violet { background: var(--violet-light); color: var(--violet); }
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow); }
+  .card-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .card-title .icon { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+  .icon-rose { background: var(--primary-light); color: var(--primary); }
+  .icon-violet { background: var(--violet-light); color: var(--violet); }
+  .icon-emerald { background: #ecfdf5; color: var(--emerald); }
+  .icon-amber { background: #fffbeb; color: var(--amber); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--gray-100); font-size: 14px; }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-label { color: var(--muted); }
+  .stat-value { font-weight: 500; font-family: 'SF Mono', 'Cascadia Code', monospace; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .status-dot.online { background: var(--emerald); box-shadow: 0 0 6px rgba(16,185,129,0.4); }
+  .status-dot.offline { background: #ef4444; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; border: none; cursor: pointer; transition: all 0.15s; }
+  .btn-primary { background: var(--primary); color: white; }
+  .btn-primary:hover { background: #e11d48; }
+  .btn-outline { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+  .btn-outline:hover { background: var(--gray-100); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .input-group { display: flex; gap: 8px; margin-top: 12px; }
+  .input-group input, .input-group textarea, .input-group select { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; background: var(--bg); color: var(--fg); outline: none; font-family: inherit; }
+  .input-group input:focus, .input-group textarea:focus, .input-group select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(244,63,94,0.1); }
+  .input-group textarea { resize: vertical; min-height: 80px; }
+  .result-img { max-width: 100%; border-radius: var(--radius); border: 1px solid var(--border); margin-top: 12px; }
+  .loading { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+  .loading::before { content: ''; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .footer { text-align: center; padding: 24px; color: var(--muted); font-size: 12px; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 12px; background: var(--gray-100); color: var(--muted); margin-right: 4px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">✦</div>
+      <span>Z-Image Service</span>
+      <span class="badge badge-rose">v3.0</span>
+    </div>
+    <div id="status-badge" class="badge badge-emerald"><span class="status-dot online"></span>运行中</div>
+  </div>
+</div>
+<div class="container">
+  <div class="grid">
+    <div class="card">
+      <div class="card-title"><span class="icon icon-violet">⚙</span>服务信息</div>
+      <div class="stat-row"><span class="stat-label">运行模式</span><span class="stat-value" id="info-mode">-</span></div>
+      <div class="stat-row"><span class="stat-label">模型</span><span class="stat-value" id="info-model">-</span></div>
+      <div class="stat-row"><span class="stat-label">GPU</span><span class="stat-value" id="info-gpu">-</span></div>
+      <div class="stat-row"><span class="stat-label">端口</span><span class="stat-value" id="info-port">-</span></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="icon icon-emerald">✓</span>健康状态</div>
+      <div class="stat-row"><span class="stat-label">状态</span><span class="stat-value" id="health-status">检查中...</span></div>
+      <div class="stat-row"><span class="stat-label">本地推理</span><span class="stat-value" id="health-local">-</span></div>
+      <div class="stat-row"><span class="stat-label">GPU 可用</span><span class="stat-value" id="health-gpu">-</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon icon-rose">✦</span>快速生成</div>
+    <div class="input-group">
+      <input type="text" id="prompt-input" placeholder="输入提示词，例如：A fashion model in a red dress, studio lighting" />
+    </div>
+    <div class="input-group">
+      <select id="resolution-select">
+        <option value="1024x1024 ( 1:1 )">1024×1024 (1:1)</option>
+        <option value="576x800 ( 3:4 )">576×800 (3:4)</option>
+        <option value="800x576 ( 4:3 )">800×576 (4:3)</option>
+        <option value="768x1024 ( 3:4 )">768×1024 (3:4)</option>
+        <option value="1024x768 ( 4:3 )">1024×768 (4:3)</option>
+      </select>
+      <button class="btn btn-primary" id="generate-btn" onclick="generate()">生成图片</button>
+    </div>
+    <div id="generate-status" style="margin-top:12px;"></div>
+    <div id="result-container"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon icon-amber">🔗</span>API 端点</div>
+    <div class="stat-row"><span class="stat-label">健康检查</span><span class="stat-value"><span class="tag">GET</span> /health</span></div>
+    <div class="stat-row"><span class="stat-label">生成图片</span><span class="stat-value"><span class="tag">POST</span> /generate</span></div>
+    <div class="stat-row"><span class="stat-label">备用生成</span><span class="stat-value"><span class="tag">POST</span> /generate/fallback</span></div>
+    <div class="stat-row"><span class="stat-label">分辨率列表</span><span class="stat-value"><span class="tag">GET</span> /resolutions</span></div>
+    <div class="stat-row"><span class="stat-label">API 文档</span><span class="stat-value"><a href="/docs" target="_blank" style="color:var(--primary);text-decoration:none;">Swagger UI →</a></span></div>
+  </div>
+
+  <div class="footer">Z-Image Bridge Service v3.0 · 通义MAI Z-Image 6B 文生图模型</div>
+</div>
+<script>
+async function loadHealth() {
+  try {
+    const r = await fetch('/health');
+    const d = await r.json();
+    document.getElementById('info-mode').textContent = d.mode || '-';
+    document.getElementById('info-model').textContent = d.model || '-';
+    document.getElementById('info-gpu').textContent = d.gpu_available ? '✓ 可用' : '✗ 不可用';
+    document.getElementById('info-port').textContent = location.port || '8001';
+    document.getElementById('health-status').textContent = d.status === 'ok' ? '✓ 正常' : '✗ 异常';
+    document.getElementById('health-local').textContent = d.local_available ? '✓ 可用' : '✗ 不可用';
+    document.getElementById('health-gpu').textContent = d.gpu_available ? '✓ 可用' : '✗ 不可用';
+    document.getElementById('status-badge').className = 'badge badge-emerald';
+    document.getElementById('status-badge').innerHTML = '<span class="status-dot online"></span>运行中';
+  } catch(e) {
+    document.getElementById('health-status').textContent = '✗ 无法连接';
+    document.getElementById('status-badge').className = 'badge badge-rose';
+    document.getElementById('status-badge').innerHTML = '<span class="status-dot offline"></span>离线';
+  }
+}
+async function generate() {
+  const prompt = document.getElementById('prompt-input').value.trim();
+  if (!prompt) { alert('请输入提示词'); return; }
+  const resolution = document.getElementById('resolution-select').value;
+  const btn = document.getElementById('generate-btn');
+  const status = document.getElementById('generate-status');
+  const result = document.getElementById('result-container');
+  btn.disabled = true;
+  btn.textContent = '生成中...';
+  status.innerHTML = '<div class="loading">正在生成图片，请稍候...</div>';
+  result.innerHTML = '';
+  const t0 = Date.now();
+  try {
+    const r = await fetch('/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, resolution, num_inference_steps: 20, guidance_scale: 4.0, random_seed: true })
+    });
+    const d = await r.json();
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    if (d.success && d.image_base64) {
+      status.innerHTML = '<span style="color:var(--emerald);font-size:14px;">✓ 生成成功 (' + elapsed + 's) · 模式: ' + (d.mode||'-') + '</span>';
+      result.innerHTML = '<img class="result-img" src="data:image/png;base64,' + d.image_base64 + '" />';
+    } else {
+      status.innerHTML = '<span style="color:#ef4444;font-size:14px;">✗ 生成失败: ' + (d.error||'未知错误') + ' (' + elapsed + 's)</span>';
+    }
+  } catch(e) {
+    status.innerHTML = '<span style="color:#ef4444;font-size:14px;">✗ 请求失败: ' + e.message + '</span>';
+  }
+  btn.disabled = false;
+  btn.textContent = '生成图片';
+}
+loadHealth();
+setInterval(loadHealth, 30000);
+</script>
+</body>
+</html>"""
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    """Dashboard page with service info and quick generation."""
+    return DASHBOARD_HTML
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():

@@ -73,3 +73,10 @@ Desktop.ini
 download/
 agent-ctx/
 worklog.md
+
+# Models (too large for Git)
+z-image-service/models/
+
+# Temp files
+get-pip.py
+*.tmp

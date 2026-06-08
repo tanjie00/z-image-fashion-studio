@@ -56,6 +56,7 @@ export function PreviewStep({ project, taskId }: PreviewStepProps) {
   }, [project]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     fetchTasks();
   }, [fetchTasks]);
 

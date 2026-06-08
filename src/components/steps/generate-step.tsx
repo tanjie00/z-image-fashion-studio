@@ -91,18 +91,21 @@ export function GenerateStep({
   }, [project]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     fetchTasks();
   }, [fetchTasks]);
 
   // Auto-refresh when processing
+  const hasProcessing = tasks.some((t) => t.status === 'processing' || t.status === 'pending');
   useEffect(() => {
-    const hasProcessing = tasks.some((t) => t.status === 'processing' || t.status === 'pending');
+    if (typeof window === 'undefined') return;
     if (!hasProcessing) return;
     const interval = setInterval(() => {
       fetchTasks();
     }, 3000);
     return () => clearInterval(interval);
-  }, [tasks, fetchTasks]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasProcessing]);
 
   const handleCreateTask = useCallback(async () => {
     if (!project || !selectedModelImageId || !selectedGarmentImageId) {

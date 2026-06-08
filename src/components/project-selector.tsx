@@ -99,10 +99,12 @@ export function ProjectSelector({ onProjectChange }: ProjectSelectorProps) {
       try {
         const res = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
         if (res.ok) {
-          await fetchProjects();
-          if (currentProjectId === id) {
+          // If deleting current project, clear selection first to avoid re-render loop
+          const cid = useAppStore.getState().currentProjectId;
+          if (cid === id) {
             setCurrentProjectId(null);
           }
+          await fetchProjects();
           toast.success('项目已删除');
         }
       } catch {
@@ -111,7 +113,7 @@ export function ProjectSelector({ onProjectChange }: ProjectSelectorProps) {
         setLoading(false);
       }
     },
-    [currentProjectId, fetchProjects, setCurrentProjectId]
+    [fetchProjects, setCurrentProjectId]
   );
 
   return (

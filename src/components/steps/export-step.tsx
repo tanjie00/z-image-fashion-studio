@@ -55,6 +55,7 @@ export function ExportStep({ project }: ExportStepProps) {
   }, [project]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     fetchCompletedTasks();
   }, [fetchCompletedTasks]);
 

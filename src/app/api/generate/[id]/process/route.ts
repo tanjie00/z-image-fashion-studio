@@ -294,6 +294,15 @@ export async function POST(
     }
   } catch (error) {
     console.error('Failed to process generation task:', error);
+    // Ensure task is marked as failed even on outer errors
+    try {
+      await db.generationTask.update({
+        where: { id },
+        data: { status: 'failed' },
+      });
+    } catch (updateError) {
+      console.error('Failed to update task status:', updateError);
+    }
     return NextResponse.json(
       { error: 'Failed to process generation task' },
       { status: 500 }

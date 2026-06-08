@@ -1,0 +1,16 @@
+node_modules/
+.next/
+.z-image-service/.venv/
+.z-image-service/models/
+.z-image-service/__pycache__/
+db/*.db
+db/*.db-journal
+*.db
+*.db-journal
+.git/
+.env.local
+.env*.local
+get-pip.py
+deploy/
+Dockerfile
+README.md
